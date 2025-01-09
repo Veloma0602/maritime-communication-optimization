@@ -8,7 +8,7 @@ def main():
     neo4j_handler = Neo4jHandler(
         uri="neo4j://localhost:7687",
         user="neo4j",
-        password="your_password"
+        password="neo4j"
     )
     
     # 获取任务数据
