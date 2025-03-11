@@ -1,12 +1,12 @@
+import numpy as np
 from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.core.problem import Problem
 from pymoo.operators.crossover.sbx import SBX
 from pymoo.operators.mutation.pm import PM
 from pymoo.optimize import minimize
 from pymoo.core.sampling import Sampling
-import numpy as np
+from pymoo.operators.sampling.rnd import FloatRandomSampling
 from typing import Dict, List, Tuple, Any, Optional
-
 from .population import PopulationManager
 
 class HistoricalCaseSampling(Sampling):
@@ -48,42 +48,63 @@ class CommunicationProblem(Problem):
         )
         self.optimizer = optimizer
     
-    def _evaluate(self, x, out, *args, **kwargs):
+    def _evaluate(self, X, out, *args, **kwargs):
         """
         评估解的目标函数值和约束
         
         参数:
-        x: 解集合
+        X: 解集合
         out: 输出字典
         """
         # 初始化目标函数值矩阵
-        f1 = np.zeros(len(x))
-        f2 = np.zeros(len(x))
-        f3 = np.zeros(len(x))
-        f4 = np.zeros(len(x))
-        f5 = np.zeros(len(x))
+        f1 = np.zeros(len(X))
+        f2 = np.zeros(len(X))
+        f3 = np.zeros(len(X))
+        f4 = np.zeros(len(X))
+        f5 = np.zeros(len(X))
         
         # 初始化约束矩阵
-        g = np.zeros((len(x), self.n_constr))
+        g = np.zeros((len(X), self.n_constraints))
         
         # 对每个解进行评估
-        for i, xi in enumerate(x):
-            # 将解向量转换为参数字典列表
-            params_list = self.optimizer.population_manager.solution_to_parameters(
-                xi, 
-                self.optimizer.n_links
-            )
+        for i, xi in enumerate(X):
+            try:
+                # 将解向量转换为参数字典列表
+                params_list = self.optimizer.population_manager.solution_to_parameters(
+                    xi, 
+                    self.optimizer.n_links
+                )
+                
+                # 计算目标函数值
+                f1[i] = self.optimizer.objectives.reliability_objective(params_list)
+                f2[i] = self.optimizer.objectives.spectral_efficiency_objective(params_list)
+                f3[i] = self.optimizer.objectives.energy_efficiency_objective(params_list)
+                f4[i] = self.optimizer.objectives.interference_objective(params_list)
+                f5[i] = self.optimizer.objectives.adaptability_objective(params_list)
+                
+                # 计算约束
+                constraints = self.optimizer.constraints.evaluate_constraints(params_list)
+                # 确保约束数量一致
+                if len(constraints) != self.n_constraints:
+                    print(f"警告: 约束数量不匹配! 期望 {self.n_constraints}, 实际 {len(constraints)}")
+                    # 调整约束数量
+                    if len(constraints) < self.n_constraints:
+                        constraints = np.pad(constraints, (0, self.n_constraints - len(constraints)), 
+                                            constant_values=-1.0)
+                    else:
+                        constraints = constraints[:self.n_constraints]
+                
+                g[i] = constraints
+            except Exception as e:
+                print(f"评估解 {i} 时出错: {str(e)}")
+                # 设置失败解的惩罚值
+                f1[i] = 1e10
+                f2[i] = 1e10
+                f3[i] = 1e10
+                f4[i] = 1e10
+                f5[i] = 1e10
+                g[i] = np.ones(self.n_constraints)  # 所有约束都违反
             
-            # 计算目标函数值
-            f1[i] = self.optimizer.objectives.reliability_objective(params_list)
-            f2[i] = self.optimizer.objectives.spectral_efficiency_objective(params_list)
-            f3[i] = self.optimizer.objectives.energy_efficiency_objective(params_list)
-            f4[i] = self.optimizer.objectives.interference_objective(params_list)
-            f5[i] = self.optimizer.objectives.adaptability_objective(params_list)
-            
-            # 计算约束
-            g[i] = self.optimizer.constraints.evaluate_constraints(params_list)
-        
         # 将目标函数值合并为矩阵
         out["F"] = np.column_stack([f1, f2, f3, f4, f5])
         
@@ -108,24 +129,18 @@ class CommunicationOptimizer:
         self.constraint_data = constraint_data
         self.config = config
         
-            # 保存连接信息，而不尝试访问内部结构
+            # 保存连接信息，使用创建Neo4j处理器时使用的原始参数
         if neo4j_handler:
-            # 从connection_acquisition方法中提取URI字符串
-            if hasattr(neo4j_handler, 'driver') and neo4j_handler.driver:
-                try:
-                    # 简单地保存连接字符串、用户名和密码
-                    self.db_info = {
-                        'uri': getattr(neo4j_handler, '_uri', 'bolt://localhost:7687'),
-                        'user': getattr(neo4j_handler, '_user', 'neo4j'),
-                        'password': getattr(neo4j_handler, '_password', 'neo4j')
-                    }
-                except Exception as e:
-                    print(f"无法提取Neo4j连接信息: {str(e)}")
-                    self.db_info = None
-            else:
-                self.db_info = None
-                
-            # 关闭原始连接，防止资源泄露
+            self.db_info = {
+                'uri': getattr(neo4j_handler, '_uri', 'bolt://localhost:7687'),
+                'user': getattr(neo4j_handler, '_user', 'neo4j'),
+                'password': getattr(neo4j_handler, '_password', '12345678')
+            }
+            
+            # 调试输出连接信息
+            print(f"保存Neo4j连接信息: {self.db_info['uri']}, 用户: {self.db_info['user']}")
+            
+            # 关闭原始连接
             try:
                 neo4j_handler.close()
             except:
@@ -142,7 +157,7 @@ class CommunicationOptimizer:
         self.objectives = ObjectiveFunction(task_data, env_data, constraint_data)
         self.constraints = Constraints(config)
         
-        # 初始化种群管理器 - 不传递Neo4j处理器
+        # 初始化种群管理器
         self.population_manager = PopulationManager(config)
         
         # 设置问题维度
@@ -210,6 +225,8 @@ class CommunicationOptimizer:
         Tuple[np.ndarray, np.ndarray]: Pareto前沿和对应的解
         """
         # 创建临时Neo4j处理器用于初始化种群
+        
+
         temp_neo4j_handler = None
         try:
             if self.db_info:
@@ -263,14 +280,6 @@ class CommunicationOptimizer:
                         return self.initial_pop
                 
                 sampling = CustomSampling(initial_population)
-            
-            # 配置NSGA-II算法
-            from pymoo.algorithms.moo.nsga2 import NSGA2
-            from pymoo.operators.crossover.sbx import SBX
-            from pymoo.operators.mutation.pm import PM
-            from pymoo.operators.sampling.rnd import FloatRandomSampling
-            from pymoo.core.sampling import Sampling
-            from pymoo.optimize import minimize
             
             algorithm = NSGA2(
                 pop_size=self.config.population_size,

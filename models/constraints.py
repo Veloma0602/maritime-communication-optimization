@@ -47,9 +47,17 @@ class Constraints:
         delay_constraints = self.delay_constraints(params_list)
         constraints.extend(delay_constraints)
         
-        # 确保返回足够的约束值
-        while len(constraints) < 7 * len(params_list):
-            constraints.append(-1.0)  # 添加满足的约束作为填充
+         # 计算应该返回的约束数量
+        expected_constraints = n_links * 7
+        
+        # 如果约束数量不匹配，调整到预期的数量
+        if len(constraints) < expected_constraints:
+            # 填充满足的约束
+            padding = [-1.0] * (expected_constraints - len(constraints))
+            constraints.extend(padding)
+        elif len(constraints) > expected_constraints:
+            # 截断多余的约束
+            constraints = constraints[:expected_constraints]
         
         return np.array(constraints)
     

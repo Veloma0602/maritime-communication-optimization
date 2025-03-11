@@ -4,18 +4,45 @@ from .noise_model import NoiseModel
 
 class ObjectiveFunction:
     def __init__(self, task_data: Dict, env_data: Dict, constraint_data: Dict):
-        """
-        初始化目标函数
-        
-        参数:
-        task_data: 任务数据
-        env_data: 环境数据
-        constraint_data: 约束数据
-        """
+        """初始化目标函数"""
         self.task_data = task_data
-        self.env_data = env_data
+        
+        # 处理环境数据键名 - 添加英文键
+        self.env_data = env_data.copy()
+        key_mapping = {
+            '海况等级': 'sea_state',
+            '电磁干扰强度': 'emi_intensity',
+            '背景噪声': 'background_noise',
+            '多径效应': 'multipath_effect',
+            '温度': 'temperature',
+            '盐度': 'salinity',
+            '深度': 'depth'
+        }
+        
+        # 为环境数据添加英文键名
+        for cn_key, en_key in key_mapping.items():
+            if cn_key in self.env_data and en_key not in self.env_data:
+                self.env_data[en_key] = self.env_data[cn_key]
+        # 确保有默认深度值
+        if 'depth' not in self.env_data and '深度' not in self.env_data:
+            self.env_data['depth'] = 50  # 默认50米深度
+        
         self.constraint_data = constraint_data
-        self.noise_model = NoiseModel(env_data)
+        
+        # 添加英文键名到约束数据
+        if constraint_data:
+            constraint_mapping = {
+                '最小可靠性要求': 'min_reliability',
+                '最大时延要求': 'max_delay',
+                '最小信噪比': 'min_snr'
+            }
+            
+            for cn_key, en_key in constraint_mapping.items():
+                if cn_key in self.constraint_data and en_key not in self.constraint_data:
+                    self.constraint_data[en_key] = self.constraint_data[cn_key]
+        
+        # 初始化噪声模型
+        self.noise_model = NoiseModel(self.env_data)
         
         # 初始化额外的参数
         self._setup_params()
@@ -93,7 +120,11 @@ class ObjectiveFunction:
                 snr = self._calculate_snr(params, link)
                 
                 # Shannon容量
-                capacity = bandwidth * np.log2(1 + np.power(10, snr/10))
+                try:
+                    snr_linear = min(10**(snr/10), 1e6)  # 限制最大值
+                    capacity = bandwidth * np.log2(1 + snr_linear)
+                except:
+                    capacity = bandwidth  # 故障时的默认值
                 
                 # 估算数据率（如果没有提供，假设是容量的70%）
                 data_rate = link.get('data_rate', capacity * 0.7)
@@ -132,7 +163,11 @@ class ObjectiveFunction:
                 
                 # 估算数据率
                 bandwidth = params.get('bandwidth', 0)
-                capacity = bandwidth * np.log2(1 + np.power(10, snr/10))
+                try:
+                    snr_linear = min(10**(snr/10), 1e6)  # 限制最大值
+                    capacity = bandwidth * np.log2(1 + snr_linear)
+                except:
+                    capacity = bandwidth  # 故障时的默认值
                 data_rate = link.get('data_rate', capacity * 0.7)
                 
                 # 通信持续时间（默认为1秒）
@@ -336,21 +371,33 @@ class ObjectiveFunction:
         返回:
         误码率
         """
-        # 转换dB到线性
-        snr_linear = 10 ** (snr / 10)
+        # 安全检查
+        if snr > 100:  # 非常高的信噪比
+            return 1e-10  # 接近零的误码率
+        elif snr < -20:  # 极低的信噪比
+            return 0.5  # 极高的误码率
+        
+        # 转换dB到线性，安全处理
+        try:
+            snr_linear = 10 ** (min(snr, 100) / 10)  # 限制最大值避免溢出
+        except:
+            snr_linear = 1.0  # 故障时的默认值
         
         # 根据调制方式计算误码率
-        if modulation == 'BPSK':
-            return 0.5 * np.exp(-snr_linear / 2)
-        elif modulation == 'QPSK':
-            return 0.5 * np.exp(-snr_linear / 4)
-        elif modulation == 'QAM16':
-            return 0.2 * np.exp(-snr_linear / 10)
-        elif modulation == 'QAM64':
-            return 0.1 * np.exp(-snr_linear / 20)
-        else:
-            # 默认为BPSK
-            return 0.5 * np.exp(-snr_linear / 2)
+        try:
+            if modulation == 'BPSK':
+                return max(1e-10, min(0.5, 0.5 * np.exp(-snr_linear / 2)))
+            elif modulation == 'QPSK':
+                return max(1e-10, min(0.5, 0.5 * np.exp(-snr_linear / 4)))
+            elif modulation == 'QAM16':
+                return max(1e-10, min(0.5, 0.2 * np.exp(-snr_linear / 10)))
+            elif modulation == 'QAM64':
+                return max(1e-10, min(0.5, 0.1 * np.exp(-snr_linear / 20)))
+            else:
+                # 默认为BPSK
+                return max(1e-10, min(0.5, 0.5 * np.exp(-snr_linear / 2)))
+        except:
+            return 0.1  # 计算出错时返回一个保守的误码率
     
     def _get_link_importance(self, link: Dict) -> float:
         """

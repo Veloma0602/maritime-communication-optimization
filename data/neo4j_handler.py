@@ -48,8 +48,9 @@ class Neo4jHandler:
         任务数据字典或None（如果找不到）
         """
         try:
-            # 步骤1: 获取任务和节点信息
+            # 直接采用更简单的查询方式，与测试查询保持一致
             with self.driver.session() as session:
+                # 获取任务
                 task_result = session.run("""
                     MATCH (t:任务 {任务编号: $task_id})
                     RETURN t
@@ -60,9 +61,9 @@ class Neo4jHandler:
                     logger.warning(f"No task found with ID: {task_id}")
                     return None
                 
-                task = dict(task_record['t'])
+                task = task_record['t']
                 
-                # 步骤2: 获取任务部署的节点
+                # 获取任务部署的节点
                 node_result = session.run("""
                     MATCH (t:任务 {任务编号: $task_id})
                     MATCH (t)-[:部署单位]->(n:节点)
@@ -70,41 +71,46 @@ class Neo4jHandler:
                     """, task_id=task_id)
                 
                 node_record = node_result.single()
-                nodes = [dict(node) for node in node_record['nodes']] if node_record else []
+                nodes = node_record['nodes'] if node_record else []
                 
-                # 步骤3: 获取节点间的通信关系（分开查询，避免复杂查询可能的性能问题）
-                if nodes:
-                    # 提取节点ID列表
-                    node_ids = [node.get('identity') for node in nodes]
+                relation_result = session.run("""
+                    MATCH (t:任务 {任务编号: $task_id})
+                    MATCH (t)-[:部署单位]->(n1:节点)
+                    MATCH (n1)-[r:通信手段]->(n2:节点)
+                    WHERE (t)-[:部署单位]->(n2)
+                    RETURN r, type(r) as rel_type, id(n1) as start_id, id(n2) as end_id
+                    """, task_id=task_id)
+
+                relationships = []
+                for record in relation_result:
+                    rel = dict(record['r'])
+                    # 添加类型信息到关系字典
+                    rel['type'] = record['rel_type']
+                    rel['start'] = record['start_id']
+                    rel['end'] = record['end_id']
+                    relationships.append(rel)
                     
-                    relation_result = session.run("""
-                        MATCH (n1:节点)-[r:通信手段]->(n2:节点)
-                        WHERE id(n1) IN $node_ids AND id(n2) IN $node_ids
-                        RETURN collect(r) as relationships
-                        """, node_ids=node_ids)
-                    
-                    relation_record = relation_result.single()
-                    relationships = [dict(rel) for rel in relation_record['relationships']] if relation_record else []
-                else:
-                    relationships = []
+                print(f"Retrieved {len(relationships)} communication relations with type info")
                 
-                # 构建返回数据
-                task_data = self.process_task_record({
+                # 构建记录
+                record = {
                     't': task,
                     'nodes': nodes,
                     'relationships': relationships
-                })
+                }
+                
+                # 处理记录
+                task_data = self.process_task_record(record)
                 
                 logger.info(f"Retrieved task data for {task_id}: {len(task_data['communication_links'])} links")
                 
-                # 调试输出
                 if not task_data['communication_links']:
                     logger.warning(f"No communication links found for task {task_id}")
                     logger.warning(f"Task has {len(nodes)} deployed nodes")
-                    
+                
                 return task_data
         except Exception as e:
-            logger.error(f"Error retrieving task data for {task_id}: {str(e)}", exc_info=True)
+            logger.error(f"Error retrieving task data for {task_id}: {str(e)}")
             return None
                 
     def get_environment_data(self, task_id: str) -> Optional[Dict]:
@@ -309,6 +315,9 @@ class Neo4jHandler:
         nodes = [dict(node) for node in record['nodes']]
         relationships = [dict(rel) for rel in record['relationships']]
         
+        # 调试信息
+        print(f"处理任务记录: 找到 {len(nodes)} 个节点, {len(relationships)} 个关系")
+        
         # 构造返回数据结构
         task_data = {
             'task_info': {
@@ -334,64 +343,67 @@ class Neo4jHandler:
 
         # 处理节点分类
         for node in nodes:
-            node_type = node.get('节点类型')
+            node_type = node.get('节点类型', '')
             
             if node_type in ['航母', '驱逐舰', '护卫舰', '潜艇']:
                 if node_type == '航母' or (node_type == '驱逐舰' and 
                                         not task_data['nodes']['command_ship']):
                     task_data['nodes']['command_ship'] = node
                 task_data['nodes']['combat_units'].append(node)
-            elif node.get('labels', []) and '指挥所' in node.get('labels', []):
+            elif '指挥所' in node.get('labels', []) or node_type == '指挥所':
                 task_data['nodes']['command_center'] = node
-            elif node.get('labels', []) and '通信站' in node.get('labels', []):
+            elif '通信站' in node.get('labels', []) or node_type == '通信站':
                 task_data['nodes']['comm_stations'].append(node)
-            elif node.get('labels', []) and '通信设备' in node.get('labels', []):
+            elif '通信设备' in node.get('labels', []) or node_type == '通信设备':
                 task_data['nodes']['communication_systems'].append(node)
-
-        # 处理通信关系，标准化通信链路数据
+        
+        # 关系处理部分
         for rel in relationships:
-            rel_type = rel.get('type')
-            if rel_type == '通信手段':
-                # 提取并标准化链路属性
-                freq_band = rel.get('properties', {}).get('工作频段', '')
-                bandwidth = rel.get('properties', {}).get('带宽大小', '')
-                power = rel.get('properties', {}).get('发射功率', '')
+            # 调试输出关系信息
+            rel_type = rel.get('type', '未知')
+            print(f"处理关系: type={rel_type}, properties={rel.get('properties', {})}")
+            
+            # 检查是否是通信手段关系 - 更宽松的匹配
+            if '通信' in rel_type or rel_type == '通信手段':
+                # 获取节点之间的关系属性
+                properties = rel.get('properties', {})
                 
-                # 尝试将文本频段和带宽转换为数值
-                freq_min, freq_max = self._parse_frequency_band(freq_band)
-                bandwidth_value = self._parse_bandwidth(bandwidth)
-                power_value = self._parse_power(power)
-                
-                # 构建通信链路数据
+                # 构建通信链路信息
                 link = {
                     'source_id': rel.get('start'),
                     'target_id': rel.get('end'),
-                    'comm_type': rel.get('properties', {}).get('通信手段类型'),
-                    'frequency_min': freq_min,
-                    'frequency_max': freq_max,
-                    'frequency_band': freq_band,
-                    'bandwidth': bandwidth_value,
-                    'bandwidth_text': bandwidth,
-                    'power': power_value,
-                    'power_text': power,
-                    'required_equipment': rel.get('properties', {}).get('所需设备'),
-                    'network_status': rel.get('properties', {}).get('网络状态'),
-                    'path': rel.get('properties', {}).get('业务传输路径', '')
+                    'comm_type': properties.get('通信手段类型', '未知'),
+                    'frequency_band': properties.get('工作频段', ''),
+                    'bandwidth': self._parse_bandwidth(properties.get('带宽大小', '')),
+                    'power': self._parse_power(properties.get('发射功率', '')),
+                    'required_equipment': properties.get('所需设备', ''),
+                    'network_status': properties.get('网络状态', ''),
+                    'path': properties.get('业务传输路径', '')
                 }
+                
+                # 解析频率
+                freq_min, freq_max = self._parse_frequency_band(properties.get('工作频段', ''))
+                link['frequency_min'] = freq_min
+                link['frequency_max'] = freq_max
+                link['frequency'] = (freq_min + freq_max) / 2  # 使用中心频率
+                
                 task_data['communication_links'].append(link)
-            
+                print(f"  创建通信链路: {link['source_id']} -> {link['target_id']}, 类型={link['comm_type']}")
+                
             elif rel_type == '有线连接':
                 # 处理有线连接
+                properties = rel.get('properties', {})
                 link = {
                     'source_id': rel.get('start'),
                     'target_id': rel.get('end'),
                     'conn_type': '有线连接',
-                    'line_type': rel.get('properties', {}).get('连接类型'),
-                    'transmission_rate': rel.get('properties', {}).get('传输速率'),
-                    'delay': rel.get('properties', {}).get('传输延迟')
+                    'line_type': properties.get('连接类型', ''),
+                    'transmission_rate': properties.get('传输速率', ''),
+                    'delay': properties.get('传输延迟', '')
                 }
                 task_data['communication_links'].append(link)
 
+        print(f"处理完成: 创建了 {len(task_data['communication_links'])} 个通信链路")
         return task_data
     
     def _parse_frequency_band(self, freq_band: str) -> tuple:
@@ -643,6 +655,30 @@ class Neo4jHandler:
                 node_record = node_result.single()
                 node_count = node_record['node_count'] if node_record else 0
                 print(f"Test 2 - Task nodes: {node_count}")
+
+                # 详细查看关系结构
+                relation_detail_result = session.run("""
+                    MATCH (t:任务 {任务编号: $task_id})
+                    MATCH (t)-[:部署单位]->(n1:节点)
+                    MATCH (n1)-[r:通信手段]->(n2:节点)
+                    WHERE (t)-[:部署单位]->(n2)
+                    RETURN n1.编号 as source, n2.编号 as target, type(r) as rel_type, r as rel_data
+                    LIMIT 1
+                    """, task_id=task_id)
+
+                detail_record = relation_detail_result.single()
+                if detail_record:
+                    print("\nDetailed relation structure:")
+                    print(f"Source: {detail_record['source']}")
+                    print(f"Target: {detail_record['target']}")
+                    print(f"Relation type: {detail_record['rel_type']}")
+                    print(f"Relation data: {dict(detail_record['rel_data'])}")
+                    
+                    # 检查关系的具体属性
+                    rel_data = dict(detail_record['rel_data'])
+                    print("\nRelation properties structure:")
+                    for key, value in rel_data.items():
+                        print(f"  {key}: {value} (type: {type(value).__name__})")
                 
                 # 测试3: 查询节点间的通信关系
                 if node_count > 0:
