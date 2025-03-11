@@ -61,3 +61,51 @@ class NoiseModel:
         N_int = 10 * np.log10(float(self.env_data['electromagnetic_intensity']))
         
         return N_amb + N_mp + L_prop + N_int
+    
+    def _process_env_data(self):
+        """处理环境数据，提取噪声计算所需的参数"""
+        # 海况等级
+        self.sea_state = self._parse_numeric_value(self.env_data.get('海况等级', 3))
+        
+        # 降雨率（如果有的话）
+        self.rain_rate = self._parse_numeric_value(self.env_data.get('降雨率', 0))
+        
+        # 电磁干扰强度
+        self.emi_level = self._parse_numeric_value(self.env_data.get('电磁干扰强度', 0.5))
+        
+        # 背景噪声 (如 "-107dBm")
+        self.background_noise = self._parse_numeric_value(self.env_data.get('背景噪声', -100))
+        
+        # 多径效应
+        self.multipath_effect = self._parse_numeric_value(self.env_data.get('多径效应', 0.3))
+        
+        # 海水温度和盐度
+        self.temperature = self._parse_numeric_value(self.env_data.get('温度', 20))
+        self.salinity = self._parse_numeric_value(self.env_data.get('盐度', 35))
+
+    def _parse_numeric_value(self, value):
+        """从可能包含单位的字符串中提取数值"""
+        if value is None:
+            return 0
+            
+        if isinstance(value, (int, float)):
+            return float(value)
+        
+        if isinstance(value, str):
+            # 尝试直接转换
+            try:
+                return float(value)
+            except ValueError:
+                pass
+                
+            # 提取数字部分 (包括负号和小数点)
+            import re
+            numeric_match = re.search(r'-?\d+\.?\d*', value)
+            if numeric_match:
+                try:
+                    return float(numeric_match.group())
+                except ValueError:
+                    pass
+        
+        # 默认返回0
+        return 0.0

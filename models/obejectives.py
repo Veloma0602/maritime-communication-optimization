@@ -19,18 +19,20 @@ class ObjectiveFunction:
         
         # 初始化额外的参数
         self._setup_params()
-    
+
     def _setup_params(self):
         """设置计算所需的参数"""
         # 从环境数据中提取信息
-        self.sea_state = float(self.env_data.get('海况等级', 3))
-        self.emi_intensity = float(self.env_data.get('电磁干扰强度', 0.5))
-        self.background_noise = float(self.env_data.get('背景噪声', -100))
+        self.sea_state = self._parse_numeric_value(self.env_data.get('海况等级', 3))
+        self.emi_intensity = self._parse_numeric_value(self.env_data.get('电磁干扰强度', 0.5))
+        
+        # 解析背景噪声 (如 "-107dBm")
+        self.background_noise = self._parse_numeric_value(self.env_data.get('背景噪声', -100))
         
         # 从约束数据中提取信息
-        self.min_reliability = float(self.constraint_data.get('最小可靠性要求', 0.95))
-        self.max_delay = float(self.constraint_data.get('最大时延要求', 100))
-        self.min_snr = float(self.constraint_data.get('最小信噪比', 15))
+        self.min_reliability = self._parse_numeric_value(self.constraint_data.get('最小可靠性要求', 0.95))
+        self.max_delay = self._parse_numeric_value(self.constraint_data.get('最大时延要求', 100))
+        self.min_snr = self._parse_numeric_value(self.constraint_data.get('最小信噪比', 15))
     
     def reliability_objective(self, params_list: List[Dict]) -> float:
         """
@@ -555,3 +557,23 @@ class ObjectiveFunction:
             }
         
         return adaptability_map.get(modulation, 0.5)
+
+    def _parse_numeric_value(self, value):
+        """从可能包含单位的字符串中提取数值"""
+        if value is None:
+            return 0
+            
+        if isinstance(value, (int, float)):
+            return float(value)
+        
+        if isinstance(value, str):
+            # 移除所有非数字、非小数点、非正负号的字符
+            numeric_chars = ''.join(c for c in value if c.isdigit() or c == '.' or c == '-')
+            if numeric_chars:
+                try:
+                    return float(numeric_chars)
+                except ValueError:
+                    pass
+        
+        # 默认返回0
+        return 0.0

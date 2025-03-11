@@ -36,6 +36,7 @@ class Neo4jHandler:
             self.driver.close()
             logger.info("Neo4j connection closed")
         
+
     def get_task_data(self, task_id: str) -> Optional[Dict]:
         """
         获取任务数据
@@ -47,26 +48,63 @@ class Neo4jHandler:
         任务数据字典或None（如果找不到）
         """
         try:
+            # 步骤1: 获取任务和节点信息
             with self.driver.session() as session:
-                result = session.run("""
+                task_result = session.run("""
                     MATCH (t:任务 {任务编号: $task_id})
-                    MATCH (t)-[:部署单位]->(n:节点)
-                    WITH t, collect(n) as nodes
-                    OPTIONAL MATCH (s:节点)-[r:通信手段]->(d:节点)
-                    WHERE s IN nodes AND d IN nodes
-                    RETURN t, nodes, collect(r) as relationships
+                    RETURN t
                     """, task_id=task_id)
                 
-                record = result.single()
-                if record:
-                    task_data = self.process_task_record(record)
-                    logger.info(f"Retrieved task data for {task_id}: {len(task_data['communication_links'])} links")
-                    return task_data
+                task_record = task_result.single()
+                if not task_record:
+                    logger.warning(f"No task found with ID: {task_id}")
+                    return None
                 
-                logger.warning(f"No task data found for task ID: {task_id}")
-                return None
+                task = dict(task_record['t'])
+                
+                # 步骤2: 获取任务部署的节点
+                node_result = session.run("""
+                    MATCH (t:任务 {任务编号: $task_id})
+                    MATCH (t)-[:部署单位]->(n:节点)
+                    RETURN collect(n) as nodes
+                    """, task_id=task_id)
+                
+                node_record = node_result.single()
+                nodes = [dict(node) for node in node_record['nodes']] if node_record else []
+                
+                # 步骤3: 获取节点间的通信关系（分开查询，避免复杂查询可能的性能问题）
+                if nodes:
+                    # 提取节点ID列表
+                    node_ids = [node.get('identity') for node in nodes]
+                    
+                    relation_result = session.run("""
+                        MATCH (n1:节点)-[r:通信手段]->(n2:节点)
+                        WHERE id(n1) IN $node_ids AND id(n2) IN $node_ids
+                        RETURN collect(r) as relationships
+                        """, node_ids=node_ids)
+                    
+                    relation_record = relation_result.single()
+                    relationships = [dict(rel) for rel in relation_record['relationships']] if relation_record else []
+                else:
+                    relationships = []
+                
+                # 构建返回数据
+                task_data = self.process_task_record({
+                    't': task,
+                    'nodes': nodes,
+                    'relationships': relationships
+                })
+                
+                logger.info(f"Retrieved task data for {task_id}: {len(task_data['communication_links'])} links")
+                
+                # 调试输出
+                if not task_data['communication_links']:
+                    logger.warning(f"No communication links found for task {task_id}")
+                    logger.warning(f"Task has {len(nodes)} deployed nodes")
+                    
+                return task_data
         except Exception as e:
-            logger.error(f"Error retrieving task data for {task_id}: {str(e)}")
+            logger.error(f"Error retrieving task data for {task_id}: {str(e)}", exc_info=True)
             return None
                 
     def get_environment_data(self, task_id: str) -> Optional[Dict]:
@@ -128,37 +166,27 @@ class Neo4jHandler:
             return None
             
     def get_similar_cases(self, task_id: str, limit: int = 10) -> List[str]:
-        """
-        获取相似历史案例
-        
-        参数:
-        task_id: 当前任务ID
-        limit: 最大返回案例数
-        
-        返回:
-        相似任务ID列表
-        """
+        """获取相似历史案例"""
         try:
             with self.driver.session() as session:
-                # 基于环境条件和任务区域的相似性寻找历史案例
+                # 基于任务区域和兵力组成寻找相似任务
                 result = session.run("""
                     MATCH (t1:任务 {任务编号: $task_id})
                     MATCH (t2:任务)
-                    WHERE t2.任务区域 = t1.任务区域 AND t2.任务编号 <> $task_id
+                    WHERE t2.任务编号 <> $task_id
                     
-                    // 获取环境条件相似度
-                    WITH t1, t2
-                    OPTIONAL MATCH (t1)-[:具有环境]->(e1:环境条件)
-                    OPTIONAL MATCH (t2)-[:具有环境]->(e2:环境条件)
+                    WITH t1, t2,
+                        CASE 
+                            WHEN t1.任务区域 = t2.任务区域 THEN 0
+                            ELSE 1
+                        END as area_diff,
+                        CASE
+                            WHEN t1.兵力组成 = t2.兵力组成 THEN 0
+                            ELSE 1
+                        END as force_diff
                     
-                    WITH t2, 
-                         CASE WHEN e1 IS NULL OR e2 IS NULL THEN 10
-                              ELSE abs(toFloat(e1.海况等级) - toFloat(e2.海况等级)) +
-                                   abs(toFloat(e1.电磁干扰强度) - toFloat(e2.电磁干扰强度))
-                         END as env_diff
-                    
-                    // 按环境差异排序
-                    ORDER BY env_diff
+                    WITH t2, (area_diff + force_diff) as total_diff
+                    ORDER BY total_diff ASC
                     LIMIT $limit
                     
                     RETURN t2.任务编号 as task_id
@@ -167,7 +195,7 @@ class Neo4jHandler:
                 similar_cases = [record['task_id'] for record in result]
                 logger.info(f"Found {len(similar_cases)} similar cases for task {task_id}")
                 return similar_cases
-                
+                    
         except Exception as e:
             logger.error(f"Error finding similar cases for {task_id}: {str(e)}")
             return []
@@ -379,10 +407,10 @@ class Neo4jHandler:
         try:
             if not freq_band or '/' not in freq_band:
                 return 0, 0
-                
+                    
             parts = freq_band.split('/')
-            min_freq = float(parts[0].strip())
-            max_freq = float(parts[1].strip())
+            min_freq = self._parse_numeric_value(parts[0].strip())
+            max_freq = self._parse_numeric_value(parts[1].strip())
             return min_freq, max_freq
         except Exception:
             return 0, 0
@@ -397,16 +425,27 @@ class Neo4jHandler:
         返回:
         带宽值（MHz）
         """
-        try:
-            if not bandwidth:
-                return 0
+        return self._parse_numeric_value(bandwidth)
+        
+    # def _parse_power(self, power: str) -> float:
+    #     """
+    #     解析功率字符串，提取数值
+        
+    #     参数:
+    #     power: 功率字符串（如 "33w"、"33W"）
+        
+    #     返回:
+    #     功率值（W）
+    #     """
+    #     try:
+    #         if not power:
+    #             return 0
                 
-            # 移除单位并转换为浮点数
-            value = ''.join(c for c in bandwidth if c.isdigit() or c == '.')
-            return float(value) if value else 0
-        except Exception:
-            return 0
-    
+    #         # 移除单位并转换为浮点数
+    #         value = ''.join(c for c in power if c.isdigit() or c == '.')
+    #         return float(value) if value else 0
+    #     except Exception:
+    #         return 0
     def _parse_power(self, power: str) -> float:
         """
         解析功率字符串，提取数值
@@ -417,12 +456,232 @@ class Neo4jHandler:
         返回:
         功率值（W）
         """
+        return self._parse_numeric_value(power)
+
+    def get_historical_communication_parameters(self, task_id: str) -> List[Dict]:
+        """从历史任务中获取通信参数配置"""
         try:
-            if not power:
-                return 0
+            with self.driver.session() as session:
+                result = session.run("""
+                    MATCH (t:任务 {任务编号: $task_id})
+                    MATCH (t)-[:部署单位]->(n1:节点)
+                    MATCH (n1)-[r:通信手段]->(n2:节点)
+                    WHERE (t)-[:部署单位]->(n2)
+                    RETURN r as communication_link
+                    """, task_id=task_id)
                 
-            # 移除单位并转换为浮点数
-            value = ''.join(c for c in power if c.isdigit() or c == '.')
-            return float(value) if value else 0
-        except Exception:
-            return 0
+                parameters = []
+                for record in result:
+                    link = dict(record['communication_link'])
+                    link_params = self._extract_communication_parameters(link)
+                    if link_params:
+                        parameters.append(link_params)
+                
+                return parameters
+        except Exception as e:
+            logger.error(f"Error retrieving communication parameters for {task_id}: {str(e)}")
+            return []
+
+    
+    def _extract_communication_parameters(self, link: Dict) -> Optional[Dict]:
+        """从通信链路中提取通信参数"""
+        try:
+            # 提取频率参数
+            freq_band = link.get('properties', {}).get('工作频段', '')
+            freq_min, freq_max = self._parse_frequency_band(freq_band)
+            center_freq = (freq_min + freq_max) / 2 if freq_min and freq_max else 0
+            
+            # 提取带宽参数
+            bandwidth_text = link.get('properties', {}).get('带宽大小', '')
+            bandwidth = self._parse_bandwidth(bandwidth_text)
+            
+            # 提取功率参数
+            power_text = link.get('properties', {}).get('发射功率', '')
+            power = self._parse_power(power_text)
+            
+            # 提取调制方式(可能需要从设备或默认值推断)
+            comm_type = link.get('properties', {}).get('通信手段类型', '')
+            modulation = self._infer_modulation(comm_type)
+            
+            # 提取极化方式(可能需要从设备或默认值推断)
+            polarization = self._infer_polarization(comm_type)
+            
+            return {
+                'frequency': center_freq,
+                'bandwidth': bandwidth,
+                'power': power,
+                'modulation': modulation,
+                'polarization': polarization,
+                'source_id': link.get('start'),
+                'target_id': link.get('end'),
+                'link_type': comm_type
+            }
+        except Exception as e:
+            logger.error(f"Error extracting parameters: {str(e)}")
+            return None
+
+    def _infer_modulation(self, comm_type: str) -> str:
+        """根据通信方式推断调制方式"""
+        modulation_map = {
+            '卫星通信': 'QPSK',
+            '超低频通信': 'BPSK',
+            '短波通信': 'BPSK',
+            '数据链': 'QAM16'
+        }
+        for key, value in modulation_map.items():
+            if key in comm_type:
+                return value
+        return 'BPSK'  # 默认值
+
+    def _infer_polarization(self, comm_type: str) -> str:
+        """根据通信方式推断极化方式"""
+        if '卫星' in comm_type:
+            return 'CIRCULAR'
+        elif '低频' in comm_type:
+            return 'LINEAR'
+        else:
+            return 'LINEAR'  # 默认值
+
+    def get_task_communication_links(self, task_id: str) -> List[Dict]:
+        """获取特定任务的通信链路，确保链路确实属于该任务"""
+        try:
+            with self.driver.session() as session:
+                # 先获取任务部署的所有节点
+                node_result = session.run("""
+                    MATCH (t:任务 {任务编号: $task_id})
+                    MATCH (t)-[:部署单位]->(n:节点)
+                    RETURN collect(n.编号) as task_nodes
+                    """, task_id=task_id)
+                
+                task_node_record = node_result.single()
+                if not task_node_record:
+                    return []
+                    
+                task_nodes = set(task_node_record['task_nodes'])
+                
+                # 然后获取这些节点之间的通信链路
+                link_result = session.run("""
+                    MATCH (s:节点)-[r:通信手段]->(t:节点)
+                    WHERE s.编号 IN $task_nodes AND t.编号 IN $task_nodes
+                    RETURN r
+                    """, task_nodes=list(task_nodes))
+                
+                links = []
+                for record in link_result:
+                    link_data = dict(record['r'])
+                    # 验证链路确实适用于当前任务
+                    if self._verify_link_for_task(link_data, task_id):
+                        links.append(link_data)
+
+                logger.info(f"Retrieved {len(links)} communication links for task {task_id}")
+                return links
+        except Exception as e:
+            logger.error(f"Error retrieving communication links: {str(e)}")
+            return []
+            
+    def _verify_link_for_task(self, link: Dict, task_id: str) -> bool:
+        """验证通信链路是否适用于特定任务"""
+        # 简单实现：假设所有在任务节点间的链路都属于该任务
+        return True
+
+    def _parse_numeric_value(self, value_str: str) -> float:
+        """
+        从可能包含单位的字符串中提取数值
+        
+        参数:
+        value_str: 可能包含单位的数值字符串
+        
+        返回:
+        提取的浮点数值
+        """
+        if value_str is None:
+            return 0.0
+            
+        if isinstance(value_str, (int, float)):
+            return float(value_str)
+        
+        if isinstance(value_str, str):
+            # 尝试直接转换
+            try:
+                return float(value_str)
+            except ValueError:
+                pass
+                
+            # 提取数字部分 (包括负号和小数点)
+            import re
+            numeric_match = re.search(r'-?\d+\.?\d*', value_str)
+            if numeric_match:
+                try:
+                    return float(numeric_match.group())
+                except ValueError:
+                    pass
+        
+        # 默认返回0
+        return 0.0
+
+    # 测试方法
+    def test_query(self, task_id: str):
+        """测试查询，用于调试"""
+        try:
+            with self.driver.session() as session:
+                # 测试1: 简单查询任务
+                task_result = session.run("""
+                    MATCH (t:任务 {任务编号: $task_id})
+                    RETURN t
+                    """, task_id=task_id)
+                
+                task_record = task_result.single()
+                print(f"Test 1 - Task query: {'Success' if task_record else 'Failed'}")
+                
+                # 测试2: 查询任务部署的节点
+                node_result = session.run("""
+                    MATCH (t:任务 {任务编号: $task_id})
+                    MATCH (t)-[:部署单位]->(n:节点)
+                    RETURN count(n) as node_count
+                    """, task_id=task_id)
+                
+                node_record = node_result.single()
+                node_count = node_record['node_count'] if node_record else 0
+                print(f"Test 2 - Task nodes: {node_count}")
+                
+                # 测试3: 查询节点间的通信关系
+                if node_count > 0:
+                    relation_result = session.run("""
+                        MATCH (t:任务 {任务编号: $task_id})
+                        MATCH (t)-[:部署单位]->(n1:节点)
+                        MATCH (n1)-[r:通信手段]->(n2:节点)
+                        WHERE (t)-[:部署单位]->(n2)
+                        RETURN count(r) as rel_count
+                        """, task_id=task_id)
+                    
+                    relation_record = relation_result.single()
+                    rel_count = relation_record['rel_count'] if relation_record else 0
+                    print(f"Test 3 - Communication relations: {rel_count}")
+                    
+                    # 测试4: 如果没有找到通信关系，尝试更宽松的查询
+                    if rel_count == 0:
+                        all_rel_result = session.run("""
+                            MATCH (n1:节点)-[r:通信手段]->(n2:节点)
+                            RETURN count(r) as all_rel_count
+                            """)
+                        
+                        all_rel_record = all_rel_result.single()
+                        all_rel_count = all_rel_record['all_rel_count'] if all_rel_record else 0
+                        print(f"Test 4 - All communication relations in DB: {all_rel_count}")
+                        
+                        # 输出一些示例通信关系
+                        if all_rel_count > 0:
+                            sample_result = session.run("""
+                                MATCH (n1:节点)-[r:通信手段]->(n2:节点)
+                                RETURN n1.编号 as source, n2.编号 as target, r
+                                LIMIT 3
+                                """)
+                            
+                            print("Sample communication relations:")
+                            for record in sample_result:
+                                print(f"  {record['source']} -> {record['target']}")
+                            
+                return True
+        except Exception as e:
+            print(f"Test query error: {str(e)}")
+            return False

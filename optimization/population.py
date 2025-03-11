@@ -11,11 +11,11 @@ class PopulationManager:
         neo4j_handler: Neo4j数据库处理器，用于获取历史案例
         """
         self.config = config
-        self.neo4j_handler = neo4j_handler
-        
+        self.neo4j_handler = neo4j_handler        
+
     def initialize_population(self, task_id: str, problem_size: int,
-                             lower_bounds: np.ndarray, upper_bounds: np.ndarray,
-                             n_population: int) -> np.ndarray:
+                            lower_bounds: np.ndarray, upper_bounds: np.ndarray,
+                            n_population: int) -> np.ndarray:
         """
         初始化种群，融合历史案例和随机生成的解
         
@@ -34,28 +34,51 @@ class PopulationManager:
         # 获取相似历史案例
         historical_cases = []
         if self.neo4j_handler:
-            historical_cases = self.neo4j_handler.get_similar_cases(
-                task_id, 
-                limit=min(n_population // 2, 10)  # 最多取一半种群大小的历史案例
-            )
-            
-            if historical_cases:
+            try:
+                historical_cases = self.neo4j_handler.get_similar_cases(
+                    task_id, 
+                    limit=min(n_population // 2, 10)  # 最多取一半种群大小的历史案例
+                )
                 print(f"找到 {len(historical_cases)} 个相似历史案例用于初始化种群")
+            except Exception as e:
+                print(f"获取相似历史案例时出错: {str(e)}")
+                historical_cases = []
         
         # 从历史案例生成初始解
         for case_id in historical_cases:
             try:
-                case_data = self.neo4j_handler.get_task_data(case_id)
-                case_results = self.neo4j_handler.get_optimization_results(case_id)
+                # 获取该任务的通信链路
+                communication_links = self.neo4j_handler.get_task_communication_links(case_id)
                 
-                if case_results:
-                    for result in case_results:
-                        solution = np.array(result.get('参数配置', []))
+                if communication_links:
+                    # 提取参数并转换为解向量
+                    parameters = []
+                    for link in communication_links:
+                        params = self.neo4j_handler._extract_communication_parameters(link)
+                        if params:
+                            parameters.append(params)
+                    
+                    # 转换为解向量
+                    if parameters:
+                        solution = self._parameters_to_solution(parameters)
                         
-                        # 确保解的维度正确
-                        if len(solution) == problem_size and self.validate_solution(solution, lower_bounds, upper_bounds):
+                        # 如果解向量维度不匹配，进行调整
+                        if len(solution) > problem_size:
+                            # 截断
+                            solution = solution[:problem_size]
+                        elif len(solution) < problem_size:
+                            # 扩展（用随机值填充）
+                            padding = np.random.uniform(
+                                low=lower_bounds[len(solution):],
+                                high=upper_bounds[len(solution):],
+                                size=problem_size - len(solution)
+                            )
+                            solution = np.concatenate([solution, padding])
+                        
+                        # 验证解是否有效
+                        if self.validate_solution(solution, lower_bounds, upper_bounds):
                             population.append(solution)
-                            print(f"使用任务 {case_id} 的优化结果初始化种群")
+                            print(f"从任务 {case_id} 的通信参数生成有效解")
                         
                         # 如果已经收集了足够的解，就停止
                         if len(population) >= n_population // 2:
@@ -64,28 +87,38 @@ class PopulationManager:
                 print(f"处理历史案例 {case_id} 时出错: {str(e)}")
                 continue
         
-        # 生成随机解补充种群
+        # 如果历史案例生成的解太少或没有历史案例，生成随机解补充种群
         n_random = n_population - len(population)
         if n_random > 0:
             print(f"生成 {n_random} 个随机解补充种群")
-            random_solutions = self.generate_random_solutions(
-                n_random,
-                problem_size,
-                lower_bounds,
-                upper_bounds
-            )
-            population.extend(random_solutions)
+            try:
+                random_solutions = self.generate_random_solutions(
+                    n_random,
+                    problem_size,
+                    lower_bounds,
+                    upper_bounds
+                )
+                population.extend(random_solutions)
+            except Exception as e:
+                print(f"生成随机解时出错: {str(e)}")
         
         # 确保种群大小正确
         if len(population) < n_population:
             print(f"种群大小不足 ({len(population)}/{n_population})，生成额外随机解")
-            extra_random = self.generate_random_solutions(
-                n_population - len(population),
-                problem_size,
-                lower_bounds,
-                upper_bounds
-            )
-            population.extend(extra_random)
+            try:
+                # 简单的随机生成，不依赖于 generate_random_solutions
+                for _ in range(n_population - len(population)):
+                    solution = np.random.uniform(
+                        low=lower_bounds,
+                        high=upper_bounds
+                    )
+                    population.append(solution)
+            except Exception as e:
+                print(f"生成额外随机解时出错: {str(e)}")
+                # 如果所有方法都失败，使用一个默认值填充
+                while len(population) < n_population:
+                    default_solution = (lower_bounds + upper_bounds) / 2
+                    population.append(default_solution)
         
         return np.array(population)
     
@@ -261,3 +294,31 @@ class PopulationManager:
                 params_list.append(params)
         
         return params_list
+    
+    def _parameters_to_solution(self, parameters: List[Dict]) -> np.ndarray:
+        """
+
+        将通信参数列表转换为解向量
+
+        """
+        solution = []
+        
+        for params in parameters:
+            # 添加频率
+            solution.append(params.get('frequency', 0))
+            
+            # 添加带宽
+            solution.append(params.get('bandwidth', 0))
+            
+            # 添加功率
+            solution.append(params.get('power', 0))
+            
+            # 添加调制方式(转换为数值索引)
+            modulation = params.get('modulation', 'BPSK')
+            solution.append(self.modulation_to_index(modulation))
+            
+            # 添加极化方式(转换为数值索引)
+            polarization = params.get('polarization', 'LINEAR')
+            solution.append(self.polarization_to_index(polarization))
+        
+        return np.array(solution)

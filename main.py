@@ -23,8 +23,8 @@ def main():
     """主程序入口，运行通信参数优化"""
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='海上通信参数多目标优化系统')
-    parser.add_argument('--task-id', type=str, default="rw001", help='要优化的任务ID')
-    parser.add_argument('--db-uri', type=str, default="neo4j://47.98.246.127:7687", help='Neo4j数据库URI')
+    parser.add_argument('--task-id', type=str, default="rw003", help='要优化的任务ID')
+    parser.add_argument('--db-uri', type=str, default="bolt://localhost:7687", help='Neo4j数据库URI')
     parser.add_argument('--db-user', type=str, default="neo4j", help='Neo4j用户名')
     parser.add_argument('--db-password', type=str, default="12345678", help='Neo4j密码')
     parser.add_argument('--output-dir', type=str, default="results", help='结果输出目录')
@@ -47,6 +47,10 @@ def main():
             user=args.db_user,
             password=args.db_password
         )
+
+        # 测试查询
+        logger.info("执行测试查询...")
+        neo4j_handler.test_query(args.task_id)
         
         # 获取任务数据
         logger.info(f"获取任务 {args.task_id} 的数据")
