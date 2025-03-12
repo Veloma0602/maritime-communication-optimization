@@ -1,5 +1,6 @@
 import numpy as np
 from typing import List, Dict, Any, Optional, Tuple
+import random
 
 class PopulationManager:
     def __init__(self, config, neo4j_handler=None):
@@ -123,9 +124,9 @@ class PopulationManager:
         return np.array(population)
     
     def generate_random_solutions(self, n_solutions: int, problem_size: int,
-                                 lower_bounds: np.ndarray, upper_bounds: np.ndarray) -> List[np.ndarray]:
+                             lower_bounds: np.ndarray, upper_bounds: np.ndarray) -> List[np.ndarray]:
         """
-        生成随机解
+        生成随机解 - 改进版
         
         参数:
         n_solutions: 需要生成的解的数量
@@ -137,31 +138,79 @@ class PopulationManager:
         随机生成的解列表
         """
         solutions = []
-        attempts = 0
-        max_attempts = n_solutions * 10  # 最大尝试次数
+        n_links = problem_size // 5  # 每个链路5个参数
         
-        while len(solutions) < n_solutions and attempts < max_attempts:
-            solution = np.random.uniform(
-                low=lower_bounds,
-                high=upper_bounds,
-                size=problem_size
-            )
+        # 常用频段和带宽配置
+        freq_bands = [
+            (400e6, 500e6),    # UHF频段
+            (1.5e9, 1.6e9),    # L频段
+            (2.3e9, 2.5e9),    # S频段
+            (3.4e9, 3.8e9),    # C频段
+            (4.8e9, 5.2e9)     # C频段
+        ]
+        
+        bandwidth_options = [5e6, 10e6, 20e6, 40e6, 50e6]  # 常用带宽选项
+        
+        for _ in range(n_solutions):
+            # 为每个链路生成合理参数
+            solution = []
             
-            if self.validate_solution(solution, lower_bounds, upper_bounds):
-                solutions.append(solution)
+            # 确保不同链路使用不同频段
+            available_bands = freq_bands.copy()
+            random.shuffle(available_bands)
             
-            attempts += 1
+            for i in range(n_links):
+                # 1. 频率 - 从可用频段中选择
+                if i < len(available_bands):
+                    band = available_bands[i]
+                    freq = random.uniform(band[0], band[1])
+                else:
+                    # 如果链路数量大于预设频段数量，则随机选择频段
+                    band = random.choice(freq_bands)
+                    freq = random.uniform(band[0], band[1])
+                solution.append(freq)
+                
+                # 2. 带宽 - 根据频率选择合适的带宽
+                if freq < 1e9:
+                    bw = random.choice(bandwidth_options[:2])  # 低频段使用较小带宽
+                elif freq < 3e9:
+                    bw = random.choice(bandwidth_options[1:3])  # 中频段使用中等带宽
+                else:
+                    bw = random.choice(bandwidth_options[2:])  # 高频段使用较大带宽
+                solution.append(bw)
+                
+                # 3. 功率 - 根据频率选择合适的功率
+                if freq < 1e9:
+                    power = random.uniform(30, 60)  # 低频段使用较大功率
+                elif freq < 3e9:
+                    power = random.uniform(20, 40)  # 中频段使用中等功率
+                else:
+                    power = random.uniform(5, 25)   # 高频段使用较小功率
+                solution.append(power)
+                
+                # 4. 调制方式 - 根据频率和带宽选择合适的调制方式
+                if freq < 1e9 or bw < 10e6:
+                    mod = random.randint(0, 1)  # 低频/小带宽使用简单调制(BPSK/QPSK)
+                else:
+                    mod = random.randint(0, 3)  # 高频/大带宽可使用复杂调制
+                solution.append(mod)
+                
+                # 5. 极化方式 - 根据应用场景选择
+                if freq < 1e9:
+                    pol = 0  # 低频段常用线性极化
+                elif freq > 3e9:
+                    pol = 1  # 高频段常用圆极化
+                else:
+                    pol = random.randint(0, 3)  # 中频段可使用各种极化
+                solution.append(pol)
             
-        # 如果尝试次数过多仍未生成足够的解，放宽验证条件
-        if len(solutions) < n_solutions:
-            print(f"警告: 尝试 {attempts} 次后仅生成 {len(solutions)}/{n_solutions} 个有效解，将放宽验证条件")
-            while len(solutions) < n_solutions:
-                solution = np.random.uniform(
-                    low=lower_bounds,
-                    high=upper_bounds,
-                    size=problem_size
-                )
-                solutions.append(solution)
+            # 将解转换为numpy数组
+            sol_array = np.array(solution)
+            
+            # 检查解是否在边界内，如果不在则截断
+            sol_array = np.clip(sol_array, lower_bounds, upper_bounds)
+            
+            solutions.append(sol_array)
         
         return solutions
     
@@ -183,8 +232,24 @@ class PopulationManager:
             if np.any(solution < lower_bounds) or np.any(solution > upper_bounds):
                 return False
             
-            # 附加的有效性检查可以在这里添加
-            # 例如检查频率间隔、功率分配等
+            # 检查频率间隔
+            # 每个链路需要5个参数，前5*n_links个元素表示频率
+            n_links = len(solution) // 5
+            
+            # 获取所有链路的频率和带宽
+            frequencies = solution[:n_links]
+            bandwidths = solution[n_links:2*n_links]
+            
+            # 检查频率间隔是否满足要求
+            min_spacing = np.max(bandwidths) * 1.2  # 最小间隔为最大带宽的1.2倍
+            
+            for i in range(n_links):
+                for j in range(i+1, n_links):
+                    spacing = abs(frequencies[i] - frequencies[j])
+                    edge_spacing = spacing - (bandwidths[i]/2 + bandwidths[j]/2)
+                    
+                    if edge_spacing < min_spacing:
+                        return False
             
             return True
         except Exception as e:
@@ -280,16 +345,39 @@ class PopulationManager:
         参数字典列表
         """
         params_list = []
-        solution = solution.reshape(-1, 5)  # 每个链路5个参数
-        
-        for i in range(n_links):
-            if i < len(solution):
+        try:
+            # 每个链路需要5个参数，重塑解向量
+            solution_reshaped = solution.reshape(-1)  # 先展平为1维
+            
+            # 确保解向量长度至少为n_links*5
+            if len(solution_reshaped) < n_links * 5:
+                # 如果解向量不够长，使用默认值填充
+                padding = np.array([4e9, 20e6, 10, 0, 0] * (n_links - len(solution_reshaped) // 5))
+                solution_reshaped = np.concatenate([solution_reshaped, padding])
+                
+            # 重新塑造为正确的维度
+            solution_reshaped = solution_reshaped[:n_links*5].reshape(n_links, 5)
+            
+            for i in range(n_links):
+                if i < len(solution_reshaped):
+                    params = {
+                        'frequency': solution_reshaped[i, 0],
+                        'bandwidth': solution_reshaped[i, 1],
+                        'power': solution_reshaped[i, 2],
+                        'modulation': self.index_to_modulation(solution_reshaped[i, 3]),
+                        'polarization': self.index_to_polarization(solution_reshaped[i, 4])
+                    }
+                    params_list.append(params)
+        except Exception as e:
+            print(f"解向量转换失败: {str(e)}")
+            # 如果转换失败，创建默认参数
+            for i in range(n_links):
                 params = {
-                    'frequency': solution[i, 0],
-                    'bandwidth': solution[i, 1],
-                    'power': solution[i, 2],
-                    'modulation': self.index_to_modulation(solution[i, 3]),
-                    'polarization': self.index_to_polarization(solution[i, 4])
+                    'frequency': 4e9,  # 4 GHz
+                    'bandwidth': 20e6,  # 20 MHz
+                    'power': 10,       # 10 W
+                    'modulation': 'BPSK',
+                    'polarization': 'LINEAR'
                 }
                 params_list.append(params)
         

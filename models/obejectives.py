@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 from .noise_model import NoiseModel
 
 class ObjectiveFunction:
-    def __init__(self, task_data: Dict, env_data: Dict, constraint_data: Dict):
+    def __init__(self, task_data: Dict, env_data: Dict, constraint_data: Dict, config=None):
         """初始化目标函数"""
         self.task_data = task_data
         
@@ -28,6 +28,8 @@ class ObjectiveFunction:
             self.env_data['depth'] = 50  # 默认50米深度
         
         self.constraint_data = constraint_data
+        self.config = config
+        
         
         # 添加英文键名到约束数据
         if constraint_data:
@@ -73,30 +75,51 @@ class ObjectiveFunction:
         """
         total_reliability = 0
         links = self.task_data.get('communication_links', [])
+
         
+    
         for i, params in enumerate(params_list):
             if i < len(links):
-                link = links[i]
+                # 使用简化的计算方式
+                freq_factor = 1.0 - (params.get('frequency', 0) / (2 * self.config.freq_max))
+                power_factor = params.get('power', 0) / self.config.power_max
+                bw = params.get('bandwidth', 0)
+                bw_optimal = (self.config.bandwidth_min + self.config.bandwidth_max) / 2
+                bw_factor = 1.0 - abs(bw - bw_optimal) / bw_optimal
                 
-                # 计算信噪比
-                snr = self._calculate_snr(params, link)
+                # 综合计算可靠性
+                reliability = 0.4 * freq_factor + 0.4 * power_factor + 0.2 * bw_factor
+                reliability = max(0.1, min(0.99, reliability))  # 限制在合理范围
                 
-                # 计算误码率
-                ber = self._calculate_bit_error_rate(snr, params.get('modulation', 'BPSK'))
-                
-                # 假设每个数据包大小为1024比特
-                packet_size = link.get('packet_size', 1024)
-                
-                # 计算包成功率（可靠性）
-                reliability = np.power(1 - ber, packet_size)
-                
-                # 考虑链路重要性
-                importance = self._get_link_importance(link)
-                
-                total_reliability += reliability * importance
+                total_reliability += reliability
         
-        # 返回负值用于最小化（原目标是最大化）
         return -total_reliability
+        
+        # for i, params in enumerate(params_list):
+        #     if i < len(links):
+        #         link = links[i]
+                
+        #         # 计算信噪比
+        #         snr = self._calculate_snr(params, link)
+                
+        #         # 计算误码率
+        #         ber = self._calculate_bit_error_rate(snr, params.get('modulation', 'BPSK'))
+                
+        #         # 假设每个数据包大小为1024比特
+        #         packet_size = link.get('packet_size', 1024)
+                
+        #         # 计算包成功率（可靠性）
+        #         reliability = np.power(1 - ber, packet_size)
+                
+        #         # 考虑链路重要性
+        #         importance = self._get_link_importance(link)
+                
+        #         total_reliability += reliability * importance
+        
+        # # 返回负值用于最小化（原目标是最大化）
+        # return -total_reliability
+
+
     
     def spectral_efficiency_objective(self, params_list: List[Dict]) -> float:
         """
@@ -121,7 +144,12 @@ class ObjectiveFunction:
                 
                 # Shannon容量
                 try:
-                    snr_linear = min(10**(snr/10), 1e6)  # 限制最大值
+                    try:
+                        # 限制SNR最大值，避免溢出
+                        limited_snr = min(max(snr, -100), 100)  # 限制SNR在合理范围内
+                        snr_linear = 10**(limited_snr/10)
+                    except:
+                        snr_linear = 1.0  # 故障时的默认值
                     capacity = bandwidth * np.log2(1 + snr_linear)
                 except:
                     capacity = bandwidth  # 故障时的默认值
@@ -164,7 +192,12 @@ class ObjectiveFunction:
                 # 估算数据率
                 bandwidth = params.get('bandwidth', 0)
                 try:
-                    snr_linear = min(10**(snr/10), 1e6)  # 限制最大值
+                    try:
+                        # 限制SNR最大值，避免溢出
+                        limited_snr = min(max(snr, -100), 100)  # 限制SNR在合理范围内
+                        snr_linear = 10**(limited_snr/10)
+                    except:
+                        snr_linear = 1.0  # 故障时的默认值
                     capacity = bandwidth * np.log2(1 + snr_linear)
                 except:
                     capacity = bandwidth  # 故障时的默认值

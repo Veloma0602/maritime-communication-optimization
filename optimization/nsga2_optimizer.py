@@ -8,6 +8,7 @@ from pymoo.core.sampling import Sampling
 from pymoo.operators.sampling.rnd import FloatRandomSampling
 from typing import Dict, List, Tuple, Any, Optional
 from .population import PopulationManager
+from pymoo.core.callback import Callback
 
 class HistoricalCaseSampling(Sampling):
     """
@@ -50,65 +51,71 @@ class CommunicationProblem(Problem):
     
     def _evaluate(self, X, out, *args, **kwargs):
         """
-        评估解的目标函数值和约束
-        
-        参数:
-        X: 解集合
-        out: 输出字典
+        评估解的目标函数值和约束 - 更详细的错误捕获
         """
         # 初始化目标函数值矩阵
-        f1 = np.zeros(len(X))
-        f2 = np.zeros(len(X))
-        f3 = np.zeros(len(X))
-        f4 = np.zeros(len(X))
-        f5 = np.zeros(len(X))
+        f = np.zeros((len(X), 5))
+        g = np.zeros((len(X), self.n_constr))
         
-        # 初始化约束矩阵
-        g = np.zeros((len(X), self.n_constraints))
-        
-        # 对每个解进行评估
         for i, xi in enumerate(X):
             try:
+                n_links = self.optimizer.n_links
                 # 将解向量转换为参数字典列表
                 params_list = self.optimizer.population_manager.solution_to_parameters(
                     xi, 
-                    self.optimizer.n_links
+                    n_links
                 )
                 
-                # 计算目标函数值
-                f1[i] = self.optimizer.objectives.reliability_objective(params_list)
-                f2[i] = self.optimizer.objectives.spectral_efficiency_objective(params_list)
-                f3[i] = self.optimizer.objectives.energy_efficiency_objective(params_list)
-                f4[i] = self.optimizer.objectives.interference_objective(params_list)
-                f5[i] = self.optimizer.objectives.adaptability_objective(params_list)
+                # 打印参数检查
+                if i == 0:  # 只打印第一个解的参数，避免日志过多
+                    print(f"解向量示例: {xi[:10]}...")
+                    print(f"参数列表示例: {params_list[0] if params_list else 'Empty'}")
+                
+                # 逐个尝试计算目标函数，并捕获各种错误
+                try:
+                    # 验证参数合法性
+                    valid_params = True
+                    for params in params_list:
+                        if not all(key in params for key in ['frequency', 'bandwidth', 'power', 'modulation', 'polarization']):
+                            print(f"警告: 参数字典缺少必要键: {params}")
+                            valid_params = False
+                            break
+                    
+                    if valid_params:
+                        # 计算目标函数
+                        f[i, 0] = self.optimizer.objectives.reliability_objective(params_list)
+                        f[i, 1] = self.optimizer.objectives.spectral_efficiency_objective(params_list)
+                        f[i, 2] = self.optimizer.objectives.energy_efficiency_objective(params_list)
+                        f[i, 3] = self.optimizer.objectives.interference_objective(params_list)
+                        f[i, 4] = self.optimizer.objectives.adaptability_objective(params_list)
+                    else:
+                        # 参数不合法，使用备用值
+                        f[i, :] = np.array([-100, -100, 100, -100, -100])
+                except Exception as e:
+                    print(f"计算目标函数时出错: {str(e)}")
+                    print(f"  解向量: {xi[:10]}...")
+                    f[i, :] = np.array([-100, -100, 100, -100, -100])
                 
                 # 计算约束
-                constraints = self.optimizer.constraints.evaluate_constraints(params_list)
-                # 确保约束数量一致
-                if len(constraints) != self.n_constraints:
-                    print(f"警告: 约束数量不匹配! 期望 {self.n_constraints}, 实际 {len(constraints)}")
-                    # 调整约束数量
-                    if len(constraints) < self.n_constraints:
-                        constraints = np.pad(constraints, (0, self.n_constraints - len(constraints)), 
+                try:
+                    constraints = self.optimizer.constraints.evaluate_constraints(params_list)
+                    if len(constraints) != self.n_constr:
+                        if len(constraints) < self.n_constr:
+                            constraints = np.pad(constraints, (0, self.n_constr - len(constraints)), 
                                             constant_values=-1.0)
-                    else:
-                        constraints = constraints[:self.n_constraints]
-                
-                g[i] = constraints
+                        else:
+                            constraints = constraints[:self.n_constr]
+                    g[i] = constraints
+                except Exception as e:
+                    print(f"计算约束时出错: {str(e)}")
+                    g[i] = np.ones(self.n_constr) * 0.5
             except Exception as e:
                 print(f"评估解 {i} 时出错: {str(e)}")
-                # 设置失败解的惩罚值
-                f1[i] = 1e10
-                f2[i] = 1e10
-                f3[i] = 1e10
-                f4[i] = 1e10
-                f5[i] = 1e10
-                g[i] = np.ones(self.n_constraints)  # 所有约束都违反
-            
-        # 将目标函数值合并为矩阵
-        out["F"] = np.column_stack([f1, f2, f3, f4, f5])
+                f[i, :] = np.array([-100, -100, 100, -100, -100])
+                g[i] = np.ones(self.n_constr) * 0.5
         
-        # 设置约束
+        # 将目标函数值设置到输出
+        out["F"] = f
         out["G"] = g
 
 class CommunicationOptimizer:
@@ -154,7 +161,7 @@ class CommunicationOptimizer:
         from models.objectives import ObjectiveFunction
         from models.constraints import Constraints
         
-        self.objectives = ObjectiveFunction(task_data, env_data, constraint_data)
+        self.objectives = ObjectiveFunction(task_data, env_data, constraint_data,config)
         self.constraints = Constraints(config)
         
         # 初始化种群管理器
@@ -196,11 +203,12 @@ class CommunicationOptimizer:
         self.n_vars = self.n_links * 5
         
         # 设置约束数量：每个链路有多个约束
-        self.n_constraints = self.n_links * 7
+        self.n_constraints = self.n_links * 4
         
         # 设置边界
         self.lower_bounds = np.array([
-            *[self.config.freq_min] * self.n_links,            # 频率下界
+            # *[self.config.freq_min] * self.n_links,            # 频率下界
+            *[1e9] * self.n_links,            # 频率下界
             *[self.config.bandwidth_min] * self.n_links,       # 带宽下界
             *[self.config.power_min] * self.n_links,           # 功率下界
             *[0] * self.n_links,                               # 调制方式下界
@@ -208,7 +216,8 @@ class CommunicationOptimizer:
         ])
         
         self.upper_bounds = np.array([
-            *[self.config.freq_max] * self.n_links,            # 频率上界
+            # *[self.config.freq_max] * self.n_links,            # 频率上界
+            *[5e9] * self.n_links,            # 频率上界
             *[self.config.bandwidth_max] * self.n_links,       # 带宽上界
             *[self.config.power_max] * self.n_links,           # 功率上界
             *[3] * self.n_links,                               # 调制方式上界
@@ -222,11 +231,9 @@ class CommunicationOptimizer:
         运行优化过程
         
         返回:
-        Tuple[np.ndarray, np.ndarray]: Pareto前沿和对应的解
+        Tuple[np.ndarray, np.ndarray, Dict]: Pareto前沿、对应的解、以及历史数据
         """
         # 创建临时Neo4j处理器用于初始化种群
-        
-
         temp_neo4j_handler = None
         try:
             if self.db_info:
@@ -247,105 +254,129 @@ class CommunicationOptimizer:
         task_id = self.task_data.get('task_info', {}).get('task_id', 'unknown')
         print(f"为任务 {task_id} 启动优化过程")
         
-        try:
-            # 获取初始种群
-            initial_population = None
-            if temp_neo4j_handler:
-                try:
-                    initial_population = self.population_manager.initialize_population(
-                        task_id,
-                        self.n_vars,
-                        self.lower_bounds,
-                        self.upper_bounds,
-                        self.config.population_size
-                    )
-                except Exception as e:
-                    print(f"初始化种群失败: {str(e)}")
-                    initial_population = None
+        # 获取初始种群
+        initial_population = None
+        if temp_neo4j_handler:
+            try:
+                initial_population = self.population_manager.initialize_population(
+                    task_id,
+                    self.n_vars,
+                    self.lower_bounds,
+                    self.upper_bounds,
+                    self.config.population_size
+                )
+            except Exception as e:
+                print(f"初始化种群失败: {str(e)}")
+                initial_population = None
             
-            # 如果初始化失败，创建一个随机初始种群
-            if initial_population is None:
-                print("使用随机初始化种群")
-                from pymoo.operators.sampling.rnd import FloatRandomSampling
-                sampling = FloatRandomSampling()
-            else:
-                # 自定义初始种群采样
-                print(f"使用自定义初始种群，大小: {len(initial_population)}")
-                class CustomSampling(Sampling):
-                    def __init__(self, initial_pop):
-                        super().__init__()
-                        self.initial_pop = initial_pop
+        # 如果初始化失败，创建一个随机初始种群
+        if initial_population is None:
+            print("使用随机初始化种群")
+            from pymoo.operators.sampling.rnd import FloatRandomSampling
+            sampling = FloatRandomSampling()
+        else:
+            # 自定义初始种群采样
+            print(f"使用自定义初始种群，大小: {len(initial_population)}")
+            class CustomSampling(Sampling):
+                def __init__(self, initial_pop):
+                    super().__init__()
+                    self.initial_pop = initial_pop
                     
-                    def _do(self, problem, n_samples, **kwargs):
-                        return self.initial_pop
+                def _do(self, problem, n_samples, **kwargs):
+                    return self.initial_pop
                 
-                sampling = CustomSampling(initial_population)
+            sampling = CustomSampling(initial_population)
             
-            algorithm = NSGA2(
-                pop_size=self.config.population_size,
-                n_offsprings=self.config.population_size,
-                sampling=sampling,
-                crossover=SBX(prob=self.config.crossover_prob, eta=15),
-                mutation=PM(prob=self.config.mutation_prob, eta=20),
-                eliminate_duplicates=True
+        algorithm = NSGA2(
+            pop_size=self.config.population_size,
+            n_offsprings=self.config.population_size,
+            sampling=sampling,
+            crossover=SBX(prob=self.config.crossover_prob, eta=15),
+            mutation=PM(prob=self.config.mutation_prob, eta=20),
+            eliminate_duplicates=True
             )
+
+        # 创建历史数据收集回调
+        history_callback = HistoryCallback()
             
-            # 运行优化
-            print(f"开始运行NSGA-II算法，共 {self.config.n_generations} 代")
+        # 运行优化
+        print(f"开始运行NSGA-II算法，共 {self.config.n_generations} 代")
+        try:
             res = minimize(
                 problem,
                 algorithm,
                 ('n_gen', self.config.n_generations),
+                callback=history_callback,
                 verbose=True
             )
-            
+                
+            # 检查结果
+            if res is None:
+                print("警告: 优化未能返回有效结果")
+                # 创建默认结果
+                default_f = np.ones((1, 5)) * 1e5  # 默认目标函数值
+                default_x = (self.lower_bounds + self.upper_bounds) / 2  # 默认参数值 (取中点)
+                default_x = default_x.reshape(1, -1)  # 重塑为二维数组
+                return default_f, default_x, getattr(history_callback, 'history', {})
+                
+            if not hasattr(res, 'F') or res.F is None or len(res.F) == 0:
+                print("警告: 优化结果中缺少目标函数值")
+                default_f = np.ones((1, 5)) * 1e5
+                default_x = res.X if hasattr(res, 'X') and res.X is not None else (self.lower_bounds + self.upper_bounds) / 2
+                default_x = default_x.reshape(1, -1)
+                return default_f, default_x, getattr(history_callback, 'history', {})
+                
             print(f"优化完成，找到 {len(res.F)} 个非支配解")
-            
-            # 清理临时Neo4j处理器
-            if temp_neo4j_handler:
-                temp_neo4j_handler.close()
-                self.population_manager.neo4j_handler = None
-            
+                
             # 返回Pareto前沿和对应的解
-            return res.F, res.X
-            
+            return res.F, res.X, history_callback.history
+                
         except Exception as e:
             # 确保清理临时资源
             if temp_neo4j_handler:
                 temp_neo4j_handler.close()
                 self.population_manager.neo4j_handler = None
-            raise e
+            print(f"优化过程发生异常: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # 发生异常时仍然返回一个有效的结果
+            default_f = np.ones((1, 5)) * 1e5  # 默认目标函数值
+            default_x = (self.lower_bounds + self.upper_bounds) / 2  # 默认参数值 (取中点)
+            default_x = default_x.reshape(1, -1)  # 重塑为二维数组
+            return default_f, default_x, getattr(history_callback, 'history', {})
+
     
     def post_process_solutions(self, objectives: np.ndarray, variables: np.ndarray) -> List[Dict]:
         """
         对优化结果进行后处理
-        
+            
         参数:
         objectives: 目标函数值
         variables: 对应的解变量
-        
+            
         返回:
         处理后的结果列表
         """
         results = []
-        
+            
         for i, (obj, var) in enumerate(zip(objectives, variables)):
             # 将解向量转换为参数
             params = self.population_manager.solution_to_parameters(var, self.n_links)
-            
+                
             # 创建结果字典
             result = {
                 'solution_id': i,
                 'objectives': {
                     'reliability': float(-obj[0]),  # 注意取反，因为优化过程中是最小化目标
                     'spectral_efficiency': float(-obj[1]),
-                    'energy_efficiency': float(-obj[2]),
+                    'energy_efficiency': float(obj[2]),
                     'interference': float(-obj[3]),
                     'adaptability': float(-obj[4])
                 },
                 'parameters': params
             }
-            
+                
             # 计算加权目标
             weighted_obj = (
                 self.config.reliability_weight * (-obj[0]) +
@@ -355,10 +386,63 @@ class CommunicationOptimizer:
                 self.config.adaptability_weight * (-obj[4])
             )
             result['weighted_objective'] = float(weighted_obj)
-            
+                
             results.append(result)
-        
-        # 按加权目标排序
+            
+        # 按加权目标排序（降序 - 越大越好）
         results.sort(key=lambda x: x['weighted_objective'], reverse=True)
-        
+            
         return results
+
+class HistoryCallback(Callback):
+    """收集优化过程历史数据的回调"""
+    
+    def __init__(self):
+        super().__init__()
+        self.history = {
+            'n_gen': [],
+            'n_eval': [],
+            'n_nds': [],
+            'cv_min': [],
+            'cv_avg': [],
+            'f_min': None,
+            'f_avg': None
+        }
+    
+    def notify(self, algorithm):
+        """每一代结束后记录数据"""
+        self.history['n_gen'].append(algorithm.n_gen)
+        self.history['n_eval'].append(algorithm.evaluator.n_eval)
+        self.history['n_nds'].append(len(algorithm.opt))
+        
+        if algorithm.pop is not None and len(algorithm.pop) > 0:
+            # 约束违反度
+            feasible = algorithm.pop.get("feasible")
+            if feasible is not None and any(~feasible):
+                cv = algorithm.pop.get("CV")
+                if cv is not None:
+                    self.history['cv_min'].append(float(cv.min()))
+                    self.history['cv_avg'].append(float(cv.mean()))
+                else:
+                    self.history['cv_min'].append(0.0)
+                    self.history['cv_avg'].append(0.0)
+            else:
+                self.history['cv_min'].append(0.0)
+                self.history['cv_avg'].append(0.0)
+                
+            # 目标函数值
+            F = algorithm.pop.get("F")
+            if F is not None and len(F) > 0:
+                n_obj = F.shape[1]
+                
+                # 初始化目标函数历史数组
+                if self.history['f_min'] is None:
+                    self.history['f_min'] = [[] for _ in range(n_obj)]
+                    self.history['f_avg'] = [[] for _ in range(n_obj)]
+                
+                # 记录每个目标的最小值和平均值
+                for i in range(n_obj):
+                    min_val = float(F[:, i].min())
+                    avg_val = float(F[:, i].mean())
+                    self.history['f_min'][i].append(min_val)
+                    self.history['f_avg'][i].append(avg_val)

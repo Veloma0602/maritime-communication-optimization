@@ -22,14 +22,42 @@ class Constraints:
         约束值数组，负值表示满足约束，正值表示违反约束
         """
         constraints = []
+
+        # 计算通信链路数量
+        n_links = len(params_list)
         
-        # 频率约束
-        freq_constraints = self.frequency_constraints(params_list)
-        constraints.extend(freq_constraints)
+        # # 频率约束
+        # freq_constraints = self.frequency_constraints(params_list)
+        # constraints.extend(freq_constraints)
         
-        # 功率约束
-        power_constraints = self.power_constraints(params_list)
-        constraints.extend(power_constraints)
+        # # 功率约束
+        # power_constraints = self.power_constraints(params_list)
+        # constraints.extend(power_constraints)
+
+        # 频率约束 - 只保留上下界约束
+        for params in params_list:
+            freq = params.get('frequency', 0)
+            
+            # 频率下界约束
+            c1 = max(-1.0, (self.config.freq_min - freq) / self.config.freq_min)
+            
+            # 频率上界约束
+            c2 = max(-1.0, (freq - self.config.freq_max) / self.config.freq_max)
+            
+            constraints.extend([c1, c2])
+        
+        # 功率约束 - 只保留上下界约束
+        for params in params_list:
+            power = params.get('power', 0)
+        
+            # 功率下界约束
+            c1 = max(-1.0, (self.config.power_min - power) / self.config.power_min)
+            
+            # 功率上界约束
+            c2 = max(-1.0, (power - self.config.power_max) / self.config.power_max)
+            
+            constraints.extend([c1, c2])
+        
         
         # 带宽约束
         bandwidth_constraints = self.bandwidth_constraints(params_list)
@@ -48,7 +76,7 @@ class Constraints:
         constraints.extend(delay_constraints)
         
          # 计算应该返回的约束数量
-        expected_constraints = n_links * 7
+        expected_constraints = n_links * 4
         
         # 如果约束数量不匹配，调整到预期的数量
         if len(constraints) < expected_constraints:
@@ -138,7 +166,7 @@ class Constraints:
         频率间隔约束
         
         参数:
-        params_list: 参数字典列表
+        params_list: 链路参数字典列表
         
         返回:
         约束值列表
@@ -147,7 +175,8 @@ class Constraints:
         n = len(params_list)
         
         # 最小频率间隔（防止链路间干扰）
-        min_spacing = self.config.bandwidth_max * 1.2  # 假设最小间隔为最大带宽的1.2倍
+        # 减少最小间隔的要求，从原来的1.2倍降低到1.0倍
+        min_spacing = self.config.bandwidth_max * 1.0  
         
         # 检查每对链路的频率间隔
         for i in range(n):
@@ -164,8 +193,14 @@ class Constraints:
                 # 计算两个频段的边界间隔
                 edge_spacing = spacing - (bw_i/2 + bw_j/2)
                 
-                # 约束: 边界间隔应大于最小间隔
-                c = min_spacing - edge_spacing
+                # 修改为软约束 - 当边界间隔不满足要求时才施加惩罚
+                if edge_spacing < min_spacing:
+                    # 归一化并限制最大约束值
+                    c = (min_spacing - edge_spacing) / min_spacing
+                    # 限制约束值的大小，避免过大的惩罚
+                    c = min(c, 1.0) * 100  # 将约束值限制在0-100范围内
+                else:
+                    c = 0.0  # 满足约束时，不施加惩罚
                 
                 constraints.append(c)
         

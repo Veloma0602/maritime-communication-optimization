@@ -12,12 +12,12 @@ class OptimizationConfig:
         self.freq_max = 10e9             # 10 GHz
         
         # 功率约束 (W)
-        self.power_min = 0.1             # 最小功率
-        self.power_max = 100             # 最大功率
+        self.power_min = 5.0             # 最小功率
+        self.power_max = 50            # 最大功率
         
         # 带宽约束 (Hz)
-        self.bandwidth_min = 1e6         # 1 MHz
-        self.bandwidth_max = 100e6       # 100 MHz
+        self.bandwidth_min = 5e6         # 5 MHz
+        self.bandwidth_max = 50e6       # 50 MHz
         
         # 信噪比约束 (dB)
         self.snr_min = 10                # 最小信噪比

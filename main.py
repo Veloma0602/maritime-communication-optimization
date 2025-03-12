@@ -1,12 +1,14 @@
 from optimization.nsga2_optimizer import CommunicationOptimizer
 from data.neo4j_handler import Neo4jHandler
 from config.parameters import OptimizationConfig
+from optimization.visualization import OptimizationVisualizer
 import numpy as np
 import logging
 import argparse
 import json
 import time
 import os
+import traceback
 
 # 配置日志
 logging.basicConfig(
@@ -30,10 +32,14 @@ def main():
     parser.add_argument('--output-dir', type=str, default="results", help='结果输出目录')
     parser.add_argument('--generations', type=int, default=None, help='NSGA-II迭代代数')
     parser.add_argument('--population', type=int, default=None, help='种群大小')
+    parser.add_argument('--no-save', action='store_true', help='不保存结果到Neo4j')
     args = parser.parse_args()
     
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
+    
+    # 初始化可视化工具
+    visualizer = OptimizationVisualizer(args.output_dir)
     
     # 记录开始时间
     start_time = time.time()
@@ -47,8 +53,8 @@ def main():
             user=args.db_user,
             password=args.db_password
         )
-
-        # 测试查询
+        
+        # 执行测试查询
         logger.info("执行测试查询...")
         neo4j_handler.test_query(args.task_id)
         
@@ -97,32 +103,61 @@ def main():
         
         # 运行优化
         logger.info("开始运行NSGA-II优化")
-        pareto_front, optimal_variables = optimizer.optimize()
+        pareto_front, optimal_variables, history = optimizer.optimize()
         
         # 处理优化结果
-        logger.info(f"优化完成，得到 {len(pareto_front)} 个非支配解")
+        n_solutions = len(pareto_front)
+        logger.info(f"优化完成，得到 {n_solutions} 个非支配解")
+        
+        # 后处理结果
         results = optimizer.post_process_solutions(pareto_front, optimal_variables)
         
-        # 保存结果到Neo4j
-        logger.info(f"保存优化结果到Neo4j数据库")
-        neo4j_handler.save_optimization_results(
-            task_id=args.task_id,
-            pareto_front=pareto_front,
-            optimal_variables=optimal_variables
+        # 可视化结果
+        logger.info("生成结果可视化...")
+        
+        # 可视化目标函数分布
+        visualizer.visualize_objectives(pareto_front, args.task_id)
+        
+        # 可视化参数分布
+        visualizer.visualize_parameter_distribution(
+            optimal_variables, 
+            args.task_id, 
+            optimizer.n_links
         )
+        
+        # 可视化收敛曲线
+        visualizer.visualize_convergence(history, args.task_id)
+        
+        # 保存结果报告
+        visualizer.save_optimization_results(results, args.task_id)
+        
+        # 打印结果摘要
+        visualizer.print_summary(results, args.task_id)
+        
+        # 如果不禁用保存，则保存到Neo4j
+        if not args.no_save:
+            logger.info(f"保存优化结果到Neo4j数据库")
+            neo4j_handler.save_optimization_results(
+                task_id=args.task_id,
+                pareto_front=pareto_front,
+                optimal_variables=optimal_variables
+            )
+        else:
+            logger.info("已禁用保存到Neo4j")
         
         # 保存详细结果到JSON文件
         result_file = os.path.join(args.output_dir, f"{args.task_id}_results.json")
         with open(result_file, 'w', encoding='utf-8') as f:
             json.dump({
                 'task_id': args.task_id,
-                'optimization_config': {
-                    'population_size': config.population_size,
-                    'n_generations': config.n_generations,
-                    'mutation_prob': config.mutation_prob,
-                    'crossover_prob': config.crossover_prob
-                },
-                'results': results,
+                'optimization_config': config.to_dict(),
+                'results': [
+                    {
+                        'objectives': r['objectives'],
+                        'weighted_objective': r['weighted_objective'],
+                        # 不保存参数以减小文件大小
+                    } for r in results
+                ],
                 'execution_time': time.time() - start_time
             }, f, ensure_ascii=False, indent=2)
         
@@ -135,19 +170,9 @@ def main():
         elapsed_time = time.time() - start_time
         logger.info(f"优化完成，耗时: {elapsed_time:.2f}秒")
         
-        # 输出最优解信息
-        if results:
-            best_solution = results[0]  # 根据加权目标排序后的第一个解
-            logger.info(f"最优解指标:")
-            logger.info(f"  可靠性: {best_solution['objectives']['reliability']:.4f}")
-            logger.info(f"  频谱效率: {best_solution['objectives']['spectral_efficiency']:.4f}")
-            logger.info(f"  能量效率: {best_solution['objectives']['energy_efficiency']:.4f}")
-            logger.info(f"  抗干扰性: {best_solution['objectives']['interference']:.4f}")
-            logger.info(f"  环境适应性: {best_solution['objectives']['adaptability']:.4f}")
-            logger.info(f"  加权评分: {best_solution['weighted_objective']:.4f}")
-    
     except Exception as e:
-        logger.error(f"优化过程中发生错误: {str(e)}", exc_info=True)
+        logger.error(f"优化过程中发生错误: {str(e)}")
+        logger.error(traceback.format_exc())
     
     logger.info("=== 优化任务结束 ===")
 
