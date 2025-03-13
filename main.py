@@ -2,27 +2,19 @@ from optimization.nsga2_optimizer import CommunicationOptimizer
 from data.neo4j_handler import Neo4jHandler
 from config.parameters import OptimizationConfig
 from optimization.visualization import OptimizationVisualizer
+from utils.logging_config import setup_logging  # 导入新的日志设置
 import numpy as np
-import logging
 import argparse
 import json
 import time
 import os
 import traceback
 
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("optimization.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-
 def main():
     """主程序入口，运行通信参数优化"""
+    # 设置带时间戳文件名的日志系统
+    logger = setup_logging()
+    
     # 解析命令行参数
     parser = argparse.ArgumentParser(description='海上通信参数多目标优化系统')
     parser.add_argument('--task-id', type=str, default="rw003", help='要优化的任务ID')

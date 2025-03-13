@@ -173,7 +173,7 @@ class ObjectiveFunction:
         params_list: 参数字典列表
         
         返回:
-        总能量开销
+        总能量开销（经过缩放）
         """
         total_energy = 0
         links = self.task_data.get('communication_links', [])
@@ -219,7 +219,11 @@ class ObjectiveFunction:
                 # 计算每比特能耗
                 energy_per_bit = total_power / (successful_bits + 1e-10)  # 避免除零
                 
-                total_energy += energy_per_bit
+                # 应用缩放因子，将能量效率降低到合理范围
+                # 假设典型的能量效率在0.1-10之间，应用对数缩放
+                scaled_energy = np.log10(energy_per_bit + 1)
+                
+                total_energy += scaled_energy
         
         return total_energy
     

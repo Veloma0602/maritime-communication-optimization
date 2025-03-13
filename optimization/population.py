@@ -14,6 +14,81 @@ class PopulationManager:
         self.config = config
         self.neo4j_handler = neo4j_handler        
 
+    def solution_to_parameters(self, solution: np.ndarray, n_links: int) -> List[Dict[str, Any]]:
+        """
+        将解向量转换为通信参数字典列表
+        
+        参数:
+        solution: 解向量
+        n_links: 通信链路数量
+        
+        返回:
+        参数字典列表
+        """
+        params_list = []
+        try:
+            # 每个链路需要5个参数，重塑解向量
+            solution_reshaped = solution.reshape(-1)  # 先展平为1维
+            
+            # 确保解向量长度至少为n_links*5
+            if len(solution_reshaped) < n_links * 5:
+                # 如果解向量不够长，使用默认值填充
+                padding = np.array([4e9, 20e6, 10, 0, 0] * (n_links - len(solution_reshaped) // 5))
+                solution_reshaped = np.concatenate([solution_reshaped, padding])
+                
+            # 重新塑造为正确的维度
+            solution_reshaped = solution_reshaped[:n_links*5].reshape(n_links, 5)
+            
+            for i in range(n_links):
+                if i < len(solution_reshaped):
+                    # 应用参数约束确保合理值
+                    freq = self._constrain_param(solution_reshaped[i, 0], self.config.freq_min, self.config.freq_max)
+                    bandwidth = self._constrain_param(solution_reshaped[i, 1], self.config.bandwidth_min, self.config.bandwidth_max)
+                    power = self._constrain_param(solution_reshaped[i, 2], self.config.power_min, self.config.power_max)
+                    
+                    params = {
+                        'frequency': freq,
+                        'bandwidth': bandwidth,
+                        'power': power,
+                        'modulation': self.index_to_modulation(solution_reshaped[i, 3]),
+                        'polarization': self.index_to_polarization(solution_reshaped[i, 4])
+                    }
+                    params_list.append(params)
+        except Exception as e:
+            print(f"解向量转换失败: {str(e)}")
+            # 如果转换失败，创建默认参数
+            for i in range(n_links):
+                params = {
+                    'frequency': 4e9,  # 4 GHz
+                    'bandwidth': 20e6,  # 20 MHz
+                    'power': 10,       # 10 W
+                    'modulation': 'BPSK',
+                    'polarization': 'LINEAR'
+                }
+                params_list.append(params)
+        
+        return params_list
+    
+    def _constrain_param(self, value: float, min_val: float, max_val: float) -> float:
+        """
+        将参数值约束在指定范围内
+        
+        参数:
+        value: 参数值
+        min_val: 最小允许值
+        max_val: 最大允许值
+        
+        返回:
+        约束后的参数值
+        """
+        if value < min_val or value > max_val:
+            # 如果大幅超出范围，使用合理的默认值
+            if value < min_val * 0.5 or value > max_val * 2:
+                return (min_val + max_val) / 2
+            # 否则剪裁到边界
+            return max(min_val, min(value, max_val))
+        return value
+
     def initialize_population(self, task_id: str, problem_size: int,
                             lower_bounds: np.ndarray, upper_bounds: np.ndarray,
                             n_population: int) -> np.ndarray:
@@ -333,61 +408,9 @@ class PopulationManager:
         }
         return index_map.get(int(round(index)), 'LINEAR')
     
-    def solution_to_parameters(self, solution: np.ndarray, n_links: int) -> List[Dict[str, Any]]:
-        """
-        将解向量转换为通信参数字典列表
-        
-        参数:
-        solution: 解向量
-        n_links: 通信链路数量
-        
-        返回:
-        参数字典列表
-        """
-        params_list = []
-        try:
-            # 每个链路需要5个参数，重塑解向量
-            solution_reshaped = solution.reshape(-1)  # 先展平为1维
-            
-            # 确保解向量长度至少为n_links*5
-            if len(solution_reshaped) < n_links * 5:
-                # 如果解向量不够长，使用默认值填充
-                padding = np.array([4e9, 20e6, 10, 0, 0] * (n_links - len(solution_reshaped) // 5))
-                solution_reshaped = np.concatenate([solution_reshaped, padding])
-                
-            # 重新塑造为正确的维度
-            solution_reshaped = solution_reshaped[:n_links*5].reshape(n_links, 5)
-            
-            for i in range(n_links):
-                if i < len(solution_reshaped):
-                    params = {
-                        'frequency': solution_reshaped[i, 0],
-                        'bandwidth': solution_reshaped[i, 1],
-                        'power': solution_reshaped[i, 2],
-                        'modulation': self.index_to_modulation(solution_reshaped[i, 3]),
-                        'polarization': self.index_to_polarization(solution_reshaped[i, 4])
-                    }
-                    params_list.append(params)
-        except Exception as e:
-            print(f"解向量转换失败: {str(e)}")
-            # 如果转换失败，创建默认参数
-            for i in range(n_links):
-                params = {
-                    'frequency': 4e9,  # 4 GHz
-                    'bandwidth': 20e6,  # 20 MHz
-                    'power': 10,       # 10 W
-                    'modulation': 'BPSK',
-                    'polarization': 'LINEAR'
-                }
-                params_list.append(params)
-        
-        return params_list
-    
     def _parameters_to_solution(self, parameters: List[Dict]) -> np.ndarray:
         """
-
         将通信参数列表转换为解向量
-
         """
         solution = []
         
